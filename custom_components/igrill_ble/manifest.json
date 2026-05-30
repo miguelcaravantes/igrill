@@ -2,7 +2,7 @@
   "domain": "igrill_ble",
   "name": "Weber iGrill BLE Sensor",
   "config_flow": true,
-  "documentation": "https://github.com/sanjay900/igrill",
+  "documentation": "https://github.com/miguelcaravantes/igrill",
   "dependencies": [
     "bluetooth"
   ],
