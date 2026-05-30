@@ -52,7 +52,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass,
             _async_update_ble,
             BluetoothCallbackMatcher(address=address),
-            bluetooth.BluetoothScanningMode.PASSIVE,
+            bluetooth.BluetoothScanningMode.ACTIVE,
         )
     )
     return True
