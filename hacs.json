@@ -2,5 +2,6 @@
     "name": "Weber iGrill",
     "domains": ["sensor"],
     "iot_class": "local_polling",
-    "render_readme": true
+    "render_readme": true,
+    "hide_default_branch": true
   }
