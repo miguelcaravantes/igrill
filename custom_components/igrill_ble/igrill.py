@@ -14,6 +14,7 @@ from homeassistant.components.bluetooth.passive_update_processor import (
     PassiveBluetoothEntityKey,
 )
 from homeassistant.core import callback
+from homeassistant.helpers.event import async_call_later
 from .const import SensorType
 import asyncio
 from bluetooth_sensor_state_data import BluetoothData
@@ -27,6 +28,8 @@ from sensor_state_data.description import BaseSensorDescription
 
 _LOGGER = logging.getLogger(__name__)
 CONNECT_LOCK = asyncio.Lock()
+RECONNECT_INTERVAL = 30
+MAX_RECONNECT_INTERVAL = 300
 
 
 class UUIDS(object):
@@ -91,6 +94,11 @@ class IDevicePeripheral(BluetoothData):
         self.address = None
         self.entity_data = {}
         self.closed = False
+        self._connecting = False
+        self._reconnect_cancel = None
+        self._reconnect_attempts = 0
+        self._hass = None
+        self._last_ble_device = None
 
         for probe_num in range(1, self.num_probes + 1):
             temp_char_name = "PROBE{}_TEMPERATURE".format(probe_num)
@@ -120,8 +128,48 @@ class IDevicePeripheral(BluetoothData):
             await self.client.write_gatt_char(UUIDS.LED_KNOB_TOGGLE, [1])
 
     def _on_disconnect(self, device):
+        _LOGGER.warning("Disconnected from %s (%s)", self.name, self.address)
         self.client = None
         self.update_listeners()
+        if not self.closed:
+            self._schedule_reconnect()
+
+    def _schedule_reconnect(self):
+        if self.closed or not self._hass or self._connecting:
+            return
+        if self._reconnect_cancel:
+            self._reconnect_cancel()
+            self._reconnect_cancel = None
+
+        delay = min(RECONNECT_INTERVAL * (2 ** min(self._reconnect_attempts, 3)), MAX_RECONNECT_INTERVAL)
+        _LOGGER.info("Scheduling reconnect attempt %d for %s in %ds", self._reconnect_attempts + 1, self.address, delay)
+
+        @callback
+        def _do_reconnect(_now):
+            self._reconnect_cancel = None
+            if self.closed or self.client:
+                return
+            self._hass.async_create_task(self._reconnect())
+
+        self._reconnect_cancel = async_call_later(self._hass, delay, _do_reconnect)
+
+    async def _reconnect(self):
+        if self._connecting or self.closed or self.client:
+            return
+        self._connecting = True
+        try:
+            if self._last_ble_device:
+                _LOGGER.info("Reconnect attempt %d for %s", self._reconnect_attempts + 1, self.address)
+                await self.async_init(self._last_ble_device)
+                self._reconnect_attempts = 0
+                _LOGGER.info("Successfully reconnected to %s", self.address)
+        except Exception as e:
+            self._reconnect_attempts += 1
+            _LOGGER.warning("Reconnect attempt %d failed for %s: %s", self._reconnect_attempts, self.address, e)
+            if not self.closed:
+                self._schedule_reconnect()
+        finally:
+            self._connecting = False
 
     def update_listeners(self):
         data = self._finish_update()
@@ -177,8 +225,14 @@ class IDevicePeripheral(BluetoothData):
 
     async def close(self):
         self.closed = True
+        if self._reconnect_cancel:
+            self._reconnect_cancel()
+            self._reconnect_cancel = None
         if self.client:
-            await self.client.disconnect()
+            try:
+                await self.client.disconnect()
+            except Exception:
+                pass
             self.client = None
 
     def get_data(self, key: PassiveBluetoothEntityKey):
@@ -200,81 +254,133 @@ class IDevicePeripheral(BluetoothData):
         """
         self.bt_name = ble_device.name
         self.address = ble_device.address
-        if not self.client and not self.closed:
-            self.client = await establish_connection(
-                BleakClient, ble_device, ble_device.address, lambda device: self._on_disconnect(device)
-            )
-            await self.client.pair(protection_level=1)
+        self._last_ble_device = ble_device
 
-            # send app challenge (16 bytes) (must be wrapped in a bytearray)
-            challenge = bytes(b"\0" * 16)
-            await self.client.write_gatt_char(UUIDS.APP_CHALLENGE, challenge)
+        if self.client and self.client.is_connected:
+            return self._finish_update()
 
-            # Normally we'd have to perform some crypto operations:
-            #     Write a challenge (in this case 16 bytes of 0)
-            #     Read the value
-            #     Decrypt w/ the key
-            #     Check the first 8 bytes match our challenge
-            #     Set the first 8 bytes 0
-            #     Encrypt with the key
-            #     Send back the new value
-            # But wait!  Our first 8 bytes are already 0.  That means we don't need the key.
-            # We just hand back the same encrypted value we get and we're good.
-            encrypted_device_challenge = await self.client.read_gatt_char(
-                UUIDS.DEVICE_CHALLENGE
-            )
-            await self.client.write_gatt_char(
-                UUIDS.DEVICE_RESPONSE, encrypted_device_challenge
-            )
+        if self._connecting or self.closed:
+            return self._finish_update()
 
-            if not self.retrieved_device_info:
-                self.retrieved_device_info = True
-                self.set_device_manufacturer("Weber")
-                self.set_device_type(self.name)
-                payload = await self.client.read_gatt_char(UUIDS.FIRMWARE_VERSION)
-                self.set_device_sw_version(payload.rstrip(b"\x00").decode("utf-8"))
-            for char, probe_id in self.temp_chars.items():
-                await self.start_notify_temp(char, f"probe_{probe_id}")
+        self._connecting = True
+        try:
+            async with CONNECT_LOCK:
+                if self.client and self.client.is_connected:
+                    return self._finish_update()
 
-            if (await self.client.get_services()).get_characteristic(
-                UUIDS.AMBIENT_TEMPERATURE
-            ):
-                self.has_ambient_temp = True
-                await self.client.start_notify(
-                    UUIDS.AMBIENT_TEMPERATURE,
-                    lambda handle, payload: self.update_temp_sensor(
-                        payload, "ambient_temp"
-                    ),
-                )
-                self.update_temp_sensor(
-                    await self.client.read_gatt_char(UUIDS.AMBIENT_TEMPERATURE),
-                    "ambient_temp",
-                )
+                _LOGGER.info("Connecting to %s (%s)", self.name, self.address)
+                try:
+                    self.client = await establish_connection(
+                        BleakClient, ble_device, ble_device.address,
+                        lambda device: self._on_disconnect(device),
+                        max_attempts=3,
+                    )
+                except Exception as e:
+                    _LOGGER.error("Failed to connect to %s: %s", self.address, e)
+                    self.client = None
+                    self._schedule_reconnect()
+                    return self._finish_update()
 
-            if self.has_heating_element:
-                await self.client.start_notify(
-                    UUIDS.HEATING_ELEMENTS,
-                    lambda handle, payload: self.update_heating_sensor(payload),
-                )
-                await self.update_heating_sensor(
-                    self.client.read_gatt_char(UUIDS.HEATING_ELEMENTS),
-                )
-            if self.has_battery:
-                await self.client.start_notify(
-                    UUIDS.BATTERY_LEVEL,
-                    lambda handle, payload: self.update_battery_sensor(payload),
-                )
-                payload = await self.client.read_gatt_char(UUIDS.BATTERY_LEVEL)
-                self.update_battery_sensor(payload)
-            if self.has_propane:
-                await self.client.start_notify(
-                    UUIDS.PROPANE_LEVEL,
-                    lambda handle, payload: self.update_propane_sensor(payload),
-                )
-                self.update_propane_sensor(
-                    await self.client.read_gatt_char(UUIDS.PROPANE_LEVEL),
-                )
+                try:
+                    await self.client.pair(protection_level=1)
+                except Exception as e:
+                    _LOGGER.warning("Pairing failed for %s: %s", self.address, e)
+
+                try:
+                    challenge = bytes(b"\0" * 16)
+                    await self.client.write_gatt_char(UUIDS.APP_CHALLENGE, challenge)
+
+                    encrypted_device_challenge = await self.client.read_gatt_char(
+                        UUIDS.DEVICE_CHALLENGE
+                    )
+                    await self.client.write_gatt_char(
+                        UUIDS.DEVICE_RESPONSE, encrypted_device_challenge
+                    )
+                except Exception as e:
+                    _LOGGER.error("Authentication failed for %s: %s", self.address, e)
+                    await self._safe_disconnect()
+                    self._schedule_reconnect()
+                    return self._finish_update()
+
+                if not self.retrieved_device_info:
+                    try:
+                        self.retrieved_device_info = True
+                        self.set_device_manufacturer("Weber")
+                        self.set_device_type(self.name)
+                        payload = await self.client.read_gatt_char(UUIDS.FIRMWARE_VERSION)
+                        self.set_device_sw_version(payload.rstrip(b"\x00").decode("utf-8"))
+                    except Exception as e:
+                        _LOGGER.warning("Failed to read device info for %s: %s", self.address, e)
+
+                for char, probe_id in self.temp_chars.items():
+                    try:
+                        await self.start_notify_temp(char, f"probe_{probe_id}")
+                    except Exception as e:
+                        _LOGGER.warning("Failed to set up probe %d notifications for %s: %s", probe_id, self.address, e)
+
+                try:
+                    if self.client.services.get_characteristic(UUIDS.AMBIENT_TEMPERATURE):
+                        self.has_ambient_temp = True
+                        await self.client.start_notify(
+                            UUIDS.AMBIENT_TEMPERATURE,
+                            lambda handle, payload: self.update_temp_sensor(payload, "ambient_temp"),
+                        )
+                        self.update_temp_sensor(
+                            await self.client.read_gatt_char(UUIDS.AMBIENT_TEMPERATURE),
+                            "ambient_temp",
+                        )
+                except Exception as e:
+                    _LOGGER.warning("Failed to set up ambient temp for %s: %s", self.address, e)
+
+                if self.has_heating_element:
+                    try:
+                        await self.client.start_notify(
+                            UUIDS.HEATING_ELEMENTS,
+                            lambda handle, payload: self.update_heating_sensor(payload),
+                        )
+                        await self.update_heating_sensor(
+                            await self.client.read_gatt_char(UUIDS.HEATING_ELEMENTS),
+                        )
+                    except Exception as e:
+                        _LOGGER.warning("Failed to set up heating element for %s: %s", self.address, e)
+
+                if self.has_battery:
+                    try:
+                        await self.client.start_notify(
+                            UUIDS.BATTERY_LEVEL,
+                            lambda handle, payload: self.update_battery_sensor(payload),
+                        )
+                        payload = await self.client.read_gatt_char(UUIDS.BATTERY_LEVEL)
+                        self.update_battery_sensor(payload)
+                    except Exception as e:
+                        _LOGGER.warning("Failed to set up battery for %s: %s", self.address, e)
+
+                if self.has_propane:
+                    try:
+                        await self.client.start_notify(
+                            UUIDS.PROPANE_LEVEL,
+                            lambda handle, payload: self.update_propane_sensor(payload),
+                        )
+                        self.update_propane_sensor(
+                            await self.client.read_gatt_char(UUIDS.PROPANE_LEVEL),
+                        )
+                    except Exception as e:
+                        _LOGGER.warning("Failed to set up propane for %s: %s", self.address, e)
+
+                self._reconnect_attempts = 0
+                _LOGGER.info("Successfully connected to %s", self.address)
+        finally:
+            self._connecting = False
+
         return self._finish_update()
+
+    async def _safe_disconnect(self):
+        if self.client:
+            try:
+                await self.client.disconnect()
+            except Exception:
+                pass
+            self.client = None
 
 
 class KitchenThermometerPeripheral(IDevicePeripheral):

@@ -26,6 +26,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     assert address is not None
     sensor_type = entry.data[CONF_SENSORTYPE]
     data = DEVICE_TYPES[sensor_type]()
+    data._hass = hass
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = data
 
@@ -35,7 +36,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         change: bluetooth.BluetoothChange,
     ) -> None:
         """Update from a ble callback."""
-        hass.async_create_task(data.async_init(service_info.device))
+        async def _init_with_error_handling():
+            try:
+                await data.async_init(service_info.device)
+            except Exception as e:
+                _LOGGER.error("Failed to initialize %s: %s", address, e)
+
+        hass.async_create_task(_init_with_error_handling())
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(
@@ -45,7 +52,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             BluetoothCallbackMatcher(address=address),
             bluetooth.BluetoothScanningMode.ACTIVE,
         )
-    )  # only start after all platforms have had a chance to subscribe
+    )
     return True
 
 
