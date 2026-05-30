@@ -135,7 +135,7 @@ class IDevicePeripheral(BluetoothData):
             self._schedule_reconnect()
 
     def _schedule_reconnect(self):
-        if self.closed or not self._hass or self._connecting:
+        if self.closed or not self._hass:
             return
         if self._reconnect_cancel:
             self._reconnect_cancel()
@@ -156,20 +156,23 @@ class IDevicePeripheral(BluetoothData):
     async def _reconnect(self):
         if self._connecting or self.closed or self.client:
             return
-        self._connecting = True
-        try:
-            if self._last_ble_device:
-                _LOGGER.info("Reconnect attempt %d for %s", self._reconnect_attempts + 1, self.address)
+        if self._last_ble_device:
+            _LOGGER.info("Reconnect attempt %d for %s", self._reconnect_attempts + 1, self.address)
+            try:
                 await self.async_init(self._last_ble_device)
-                self._reconnect_attempts = 0
-                _LOGGER.info("Successfully reconnected to %s", self.address)
-        except Exception as e:
-            self._reconnect_attempts += 1
-            _LOGGER.warning("Reconnect attempt %d failed for %s: %s", self._reconnect_attempts, self.address, e)
-            if not self.closed:
-                self._schedule_reconnect()
-        finally:
-            self._connecting = False
+                if self.client and self.client.is_connected:
+                    self._reconnect_attempts = 0
+                    _LOGGER.info("Successfully reconnected to %s", self.address)
+                else:
+                    self._reconnect_attempts += 1
+                    _LOGGER.warning("Reconnect attempt %d failed for %s: not connected after async_init", self._reconnect_attempts, self.address)
+                    if not self.closed:
+                        self._schedule_reconnect()
+            except Exception as e:
+                self._reconnect_attempts += 1
+                _LOGGER.warning("Reconnect attempt %d failed for %s: %s", self._reconnect_attempts, self.address, e)
+                if not self.closed:
+                    self._schedule_reconnect()
 
     def update_listeners(self):
         data = self._finish_update()
