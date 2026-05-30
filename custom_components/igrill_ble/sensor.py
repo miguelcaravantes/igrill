@@ -97,7 +97,7 @@ def sensor_device_info_to_hass(
         hass_device_info[ATTR_MODEL] = sensor_device_info.model
     if sensor_device_info.sw_version is not None:
         hass_device_info[ATTR_SW_VERSION] = sensor_device_info.sw_version
-    if sensor_device_info.sw_version is not None:
+    if sensor_device_info.hw_version is not None:
         hass_device_info[ATTR_HW_VERSION] = sensor_device_info.hw_version
     return hass_device_info
 
@@ -227,4 +227,7 @@ class IGrillSensorEntity(
     @property
     def available(self) -> bool:
         """Return if entity is available."""
-        return self.data.client and self.data.client.is_connected
+        try:
+            return bool(self.data.client and self.data.client.is_connected)
+        except Exception:
+            return False

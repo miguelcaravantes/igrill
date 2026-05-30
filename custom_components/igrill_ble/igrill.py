@@ -10,13 +10,14 @@ from bleak_retry_connector import (
     establish_connection,
 )
 
+import asyncio
+
 from homeassistant.components.bluetooth.passive_update_processor import (
     PassiveBluetoothEntityKey,
 )
 from homeassistant.core import callback
 from homeassistant.helpers.event import async_call_later
 from .const import SensorType
-import asyncio
 from bluetooth_sensor_state_data import BluetoothData
 from sensor_state_data import (
     SensorDeviceClass,
@@ -27,7 +28,6 @@ from sensor_state_data import (
 from sensor_state_data.description import BaseSensorDescription
 
 _LOGGER = logging.getLogger(__name__)
-CONNECT_LOCK = asyncio.Lock()
 RECONNECT_INTERVAL = 30
 MAX_RECONNECT_INTERVAL = 300
 
@@ -97,6 +97,7 @@ class IDevicePeripheral(BluetoothData):
         self._connecting = False
         self._reconnect_cancel = None
         self._reconnect_attempts = 0
+        self._connect_lock = asyncio.Lock()
         self._hass = None
         self._last_ble_device = None
 
@@ -135,7 +136,7 @@ class IDevicePeripheral(BluetoothData):
             self._schedule_reconnect()
 
     def _schedule_reconnect(self):
-        if self.closed or not self._hass:
+        if self.closed or not self._hass or self._connecting:
             return
         if self._reconnect_cancel:
             self._reconnect_cancel()
@@ -156,23 +157,20 @@ class IDevicePeripheral(BluetoothData):
     async def _reconnect(self):
         if self._connecting or self.closed or self.client:
             return
-        if self._last_ble_device:
-            _LOGGER.info("Reconnect attempt %d for %s", self._reconnect_attempts + 1, self.address)
-            try:
+        self._connecting = True
+        try:
+            if self._last_ble_device:
+                _LOGGER.info("Reconnect attempt %d for %s", self._reconnect_attempts + 1, self.address)
                 await self.async_init(self._last_ble_device)
-                if self.client and self.client.is_connected:
-                    self._reconnect_attempts = 0
-                    _LOGGER.info("Successfully reconnected to %s", self.address)
-                else:
-                    self._reconnect_attempts += 1
-                    _LOGGER.warning("Reconnect attempt %d failed for %s: not connected after async_init", self._reconnect_attempts, self.address)
-                    if not self.closed:
-                        self._schedule_reconnect()
-            except Exception as e:
-                self._reconnect_attempts += 1
-                _LOGGER.warning("Reconnect attempt %d failed for %s: %s", self._reconnect_attempts, self.address, e)
-                if not self.closed:
-                    self._schedule_reconnect()
+                self._reconnect_attempts = 0
+                _LOGGER.info("Successfully reconnected to %s", self.address)
+        except Exception as e:
+            self._reconnect_attempts += 1
+            _LOGGER.warning("Reconnect attempt %d failed for %s: %s", self._reconnect_attempts, self.address, e)
+            if not self.closed:
+                self._schedule_reconnect()
+        finally:
+            self._connecting = False
 
     def update_listeners(self):
         data = self._finish_update()
@@ -267,7 +265,7 @@ class IDevicePeripheral(BluetoothData):
 
         self._connecting = True
         try:
-            async with CONNECT_LOCK:
+            async with self._connect_lock:
                 if self.client and self.client.is_connected:
                     return self._finish_update()
 
