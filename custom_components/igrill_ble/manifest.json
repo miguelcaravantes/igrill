@@ -14,7 +14,7 @@
     "bleak>=0.22.0"
   ],
   "codeowners": ["@miguelcaravantes"],
-  "version": "v1.1.0",
+  "version": "1.1.0",
   "iot_class": "local_push",
   "bluetooth": [
     {
