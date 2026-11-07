@@ -157,20 +157,12 @@ class IDevicePeripheral(BluetoothData):
     async def _reconnect(self):
         if self._connecting or self.closed or self.client:
             return
-        self._connecting = True
-        try:
-            if self._last_ble_device:
-                _LOGGER.info("Reconnect attempt %d for %s", self._reconnect_attempts + 1, self.address)
+        if self._last_ble_device:
+            _LOGGER.info("Reconnect attempt %d for %s", self._reconnect_attempts + 1, self.address)
+            try:
                 await self.async_init(self._last_ble_device)
-                self._reconnect_attempts = 0
-                _LOGGER.info("Successfully reconnected to %s", self.address)
-        except Exception as e:
-            self._reconnect_attempts += 1
-            _LOGGER.warning("Reconnect attempt %d failed for %s: %s", self._reconnect_attempts, self.address, e)
-            if not self.closed:
-                self._schedule_reconnect()
-        finally:
-            self._connecting = False
+            except Exception as e:
+                _LOGGER.warning("Reconnect attempt failed for %s: %s", self.address, e)
 
     def update_listeners(self):
         data = self._finish_update()
@@ -279,13 +271,15 @@ class IDevicePeripheral(BluetoothData):
                 except Exception as e:
                     _LOGGER.error("Failed to connect to %s: %s", self.address, e)
                     self.client = None
-                    self._schedule_reconnect()
                     return self._finish_update()
 
                 try:
                     await self.client.pair(protection_level=1)
                 except Exception as e:
                     _LOGGER.warning("Pairing failed for %s: %s", self.address, e)
+
+                if not self.client or not self.client.is_connected:
+                    return self._finish_update()
 
                 try:
                     challenge = bytes(b"\0" * 16)
@@ -300,7 +294,6 @@ class IDevicePeripheral(BluetoothData):
                 except Exception as e:
                     _LOGGER.error("Authentication failed for %s: %s", self.address, e)
                     await self._safe_disconnect()
-                    self._schedule_reconnect()
                     return self._finish_update()
 
                 if not self.retrieved_device_info:
@@ -372,6 +365,10 @@ class IDevicePeripheral(BluetoothData):
                 _LOGGER.info("Successfully connected to %s", self.address)
         finally:
             self._connecting = False
+            if not self.closed and (not self.client or not self.client.is_connected):
+                await self._safe_disconnect()
+                self._reconnect_attempts += 1
+                self._schedule_reconnect()
 
         return self._finish_update()
 

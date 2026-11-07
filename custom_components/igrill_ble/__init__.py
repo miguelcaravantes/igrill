@@ -36,6 +36,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         change: bluetooth.BluetoothChange,
     ) -> None:
         """Update from a ble callback."""
+        if data.closed or data._connecting or data._reconnect_cancel:
+            return
         if data.client and data.client.is_connected:
             return
         async def _init_with_error_handling():
