@@ -88,7 +88,7 @@ def sensor_device_info_to_hass(
     sensor_device_info: SensorDeviceInfo,
 ) -> DeviceInfo:
     """Convert a sensor device info to a sensor device info."""
-    hass_device_info = DeviceInfo({})
+    hass_device_info = DeviceInfo()
     if sensor_device_info.name is not None:
         hass_device_info[ATTR_NAME] = sensor_device_info.name
     if sensor_device_info.manufacturer is not None:
@@ -192,16 +192,13 @@ class IGrillSensorEntity(
         if device_id in devices:
             base_device_info = devices[device_id]
         else:
-            base_device_info = DeviceInfo({})
+            base_device_info = DeviceInfo()
+        self._attr_device_info = DeviceInfo(**base_device_info)
         if device_id:
-            self._attr_device_info = base_device_info | DeviceInfo(
-                {ATTR_IDENTIFIERS: {(DOMAIN, f"{address}-{device_id}")}}
-            )
+            self._attr_device_info[ATTR_IDENTIFIERS] = {(DOMAIN, f"{address}-{device_id}")}
             self._attr_unique_id = f"{address}-{key}-{device_id}"
         else:
-            self._attr_device_info = base_device_info | DeviceInfo(
-                {ATTR_IDENTIFIERS: {(DOMAIN, address)}}
-            )
+            self._attr_device_info[ATTR_IDENTIFIERS] = {(DOMAIN, address)}
             self._attr_unique_id = f"{address}-{key}"
         if ATTR_NAME not in self._attr_device_info:
             self._attr_device_info[ATTR_NAME] = data.bt_name
